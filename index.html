@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Serverless WebRTC Chat</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+</head>
+
+<body>
+    <h1>Serverless WebRTC Chat</h1>
+
+    <div id="chatArea">
+        <p><strong>Instructions:</strong> Share the generated URL to establish a connection.</p>
+        <div id="messages"></div>
+        <textarea id="messageInput" placeholder="Enter message"></textarea>
+        <button id="sendButton">Send</button>
+    </div>
+
+    <div id="shareableUrlArea">
+        <p><strong>Shareable URL</strong></p>
+        <input type="text" id="shareableUrl" readonly />
+        <button id="copyUrlButton">Copy URL</button>
+        <button id="whatsappShareButton">Share URL on WhatsApp</button>
+        <button id="clearStorageButton">Clear Storage</button>
+
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            function compressSDP(desc) {
+                const json = JSON.stringify(desc);
+                const compressed = pako.deflate(json, { to: 'string' });
+                return encodeURIComponent(btoa(String.fromCharCode.apply(null, compressed))); // Ensure URL-safe encoding
+            }
+
+            function decompressSDP(str) {
+                try {
+                    const decodedStr = decodeURIComponent(str); // Fix URL encoding issue
+                    return JSON.parse(pako.inflate(Uint8Array.from(atob(decodedStr), c => c.charCodeAt(0)), { to: 'string' }));
+                } catch (error) {
+                    console.error("Error decoding SDP:", error);
+                    return null;
+                }
+            }
+
+            function getQueryParam(name) {
+                return new URLSearchParams(window.location.search).get(name);
+            }
+
+            function updateShareableURL(param, value) {
+                const url = new URL(window.location.href);
+                url.search = `?${param}=${value}`;
+                document.getElementById('shareableUrl').value = url.toString();
+            }
+
+            const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+            let pc = new RTCPeerConnection(configuration);
+            let dc = null;
+
+            pc.onicecandidate = e => {
+                if (!e.candidate) {
+                    const compressed = compressSDP(pc.localDescription);
+                    if (pc.localDescription.type === 'offer') {
+                        updateShareableURL('offer', compressed);
+                        localStorage.setItem('localOffer', compressed);
+                    } else if (pc.localDescription.type === 'answer') {
+                        updateShareableURL('answer', compressed);
+                        localStorage.setItem('localAnswer', compressed);
+                    }
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'connected') {
+                    console.log("✅ Connection established!");
+                    localStorage.removeItem('localOffer');
+                    localStorage.removeItem('remoteOffer');
+                    localStorage.removeItem('localAnswer');
+                }
+            };
+
+            pc.ondatachannel = e => {
+                dc = e.channel;
+                dc.onopen = () => console.log("Data channel opened");
+                dc.onmessage = e => {
+                    const message = document.createElement('p');
+                    message.textContent = 'Peer: ' + e.data;
+                    document.getElementById('messages').appendChild(message);
+                };
+            };
+
+            document.getElementById('sendButton').addEventListener('click', () => {
+                const message = document.getElementById('messageInput').value;
+                if (dc && dc.readyState === 'open') {
+                    dc.send(message);
+                    const msgElement = document.createElement('p');
+                    msgElement.textContent = 'Me: ' + message;
+                    document.getElementById('messages').appendChild(msgElement);
+                    document.getElementById('messageInput').value = '';
+                } else {
+                    alert('Data channel not open.');
+                }
+            });
+
+            const offer = getQueryParam('offer');
+            const answer = getQueryParam('answer');
+
+            if (!offer && !answer) {
+                /** INITIATOR MODE **/
+                console.log("🔵 Initiator mode: Generating an offer...");
+                dc = pc.createDataChannel("chat");
+                dc.onopen = () => console.log("Data channel opened");
+                dc.onmessage = e => {
+                    const message = document.createElement('p');
+                    message.textContent = 'Peer: ' + e.data;
+                    document.getElementById('messages').appendChild(message);
+                };
+
+                const offerDesc = await pc.createOffer();
+                await pc.setLocalDescription(offerDesc);
+                const compressedOffer = compressSDP(offerDesc);
+                updateShareableURL('offer', compressedOffer);
+                localStorage.setItem('localOffer', compressedOffer);
+
+                document.getElementById('whatsappShareButton').addEventListener('click', function () {
+                    const shareableUrl = document.getElementById('shareableUrl').value;
+                    const message = "Join My Session: offer " + shareableUrl;
+                    const whatsappUrl = "https://api.whatsapp.com/send?text=" + encodeURIComponent(message);
+                    window.open(whatsappUrl, "_blank");
+                });
+
+                /** POLL FOR ANSWER **/
+                const checkAnswer = setInterval(async () => {
+                    const storedAnswer = localStorage.getItem('localAnswer');
+                    if (storedAnswer) {
+                        clearInterval(checkAnswer);
+                        const answerDesc = decompressSDP(storedAnswer);
+                        await pc.setRemoteDescription(answerDesc);
+                        console.log("✅ Connection established!");
+                    }
+                }, 1000);
+
+            } else if (offer) {
+                /** RETRIEVER MODE **/
+                console.log("🟡 Retriever mode: Received offer, generating answer...");
+                const offerDesc = decompressSDP(offer);
+                await pc.setRemoteDescription(offerDesc);
+
+                const answerDesc = await pc.createAnswer();
+                await pc.setLocalDescription(answerDesc);
+                const compressedAnswer = compressSDP(answerDesc);
+
+                /** Displays the answer URL but does NOT set it yet **/
+                updateShareableURL('answer', compressedAnswer);
+                localStorage.setItem('localAnswer', compressedAnswer);
+                document.getElementById('whatsappShareButton').addEventListener('click', function () {
+                    const shareableUrl = document.getElementById('shareableUrl').value;
+                    const message = "Accepting you offer: answer " + shareableUrl;
+                    const whatsappUrl = "https://api.whatsapp.com/send?text=" + encodeURIComponent(message);
+                    window.open(whatsappUrl, "_blank");
+                });
+                console.log("🟡 Answer generated. Send the answer URL to the initiator.");
+
+            } else if (answer) {
+                /** RESPONSE MODE **/
+                console.log("🟢 Response mode: Storing answer and waiting for initiator...");
+                localStorage.setItem('localAnswer', answer);
+                document.body.innerHTML = '<p>You can now close this tab.</p>';
+            }
+
+            document.getElementById('copyUrlButton').addEventListener('click', () => {
+                const shareableUrl = document.getElementById('shareableUrl');
+                shareableUrl.select();
+                navigator.clipboard.writeText(shareableUrl.value).then(() => {
+                    alert("URL copied to clipboard!");
+                });
+            });
+
+            document.getElementById('clearStorageButton').addEventListener('click', () => {
+                localStorage.clear();
+                document.getElementById('shareableUrl').value = '';
+                alert("Local storage cleared.");
+            });
+
+        });
+    </script>
+</body>
+
+</html>

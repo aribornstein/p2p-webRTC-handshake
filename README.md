@@ -1,6 +1,6 @@
-# p2p-webRTC-handshake
+# Quest WebRTC chat
 
-This project demonstrates a serverless WebRTC chat application. It allows two peers to establish a direct, peer-to-peer connection and exchange messages without the need for a central server, except for initial signaling using URL parameters.
+This project demonstrates a serverless WebRTC chat application. It was designed to enable serverless client communicaiton between a quest 3 device and a mobile phone/ pc browser. It allows two peers to establish a direct, peer-to-peer connection and exchange messages without the need for a central server, except for initial signaling using URL parameters.
 
 ## Features
 

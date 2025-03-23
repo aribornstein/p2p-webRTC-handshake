@@ -10,8 +10,10 @@ This project demonstrates a serverless WebRTC chat application. It allows two pe
 - **ICE Server Configuration:** Utilizes Google's public STUN server for NAT traversal.
 - **Data Channel:** Establishes a data channel for sending and receiving text messages.
 - **Shareable URL:** Generates a shareable URL that can be sent to the other peer to initiate the connection.
+
 - **Local Storage:** Temporarily stores offer and answer SDPs in local storage to handle connection establishment across different tabs or browser instances.
 - **Copy URL Button:** Provides a button to easily copy the generated shareable URL to the clipboard.
+- **Send with Whats App Button:** Sends a shareable URL to someone over what'sapp that can be sent to the other peer to initiate the connection.
 - **Clear Storage Button:** Provides a button to clear local storage.
 
 ## How it Works
@@ -46,6 +48,6 @@ This project demonstrates a serverless WebRTC chat application. It allows two pe
 
 ## Notes
 
-- This is a basic implementation and may require further enhancements for production use, such as a more robust signaling mechanism.
-- The peers must have a way to exchange URLs (e.g., chat, email, or any other messaging platform).
+- This is a basic implementation and may require further enhancements for production use, such as a more robust signaling mechanism or security.
+- The peers must have a way to exchange URLs (e.g., chat, whatsapp, email, or any other messaging platform).
 - The application relies on browser support for WebRTC and the `pako` library.

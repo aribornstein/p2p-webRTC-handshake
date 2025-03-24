@@ -27,6 +27,8 @@
 
     <script>
         document.addEventListener('DOMContentLoaded', async () => {
+            window.__WEBRTC_DEBUG = true;
+            window.__WEBRTC_TRACE_LEVEL = 4;
             if (!window.RTCPeerConnection) {
                 console.error("RTCPeerConnection not supported!");
                 document.body.innerHTML = '<p>WebRTC is not supported in this browser</p>';
@@ -101,6 +103,14 @@
                     message.textContent = 'Peer: ' + e.data;
                     document.getElementById('messages').appendChild(message);
                 };
+            };
+
+            pc.onerror = function(event) {
+                if (event.error) {
+                    console.error('WebRTC error:', event.error);
+                } else {
+                    console.error('WebRTC error:', event);
+                }
             };
 
             document.getElementById('sendButton').addEventListener('click', () => {

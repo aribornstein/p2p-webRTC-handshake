@@ -2,12 +2,25 @@
 <html>
 
 <head>
-    <title>Serverless WebRTC Chat</title>
+    <title>Serverless WebRTC Chat (Debug)</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <style>
+        body { font-family: sans-serif; }
+        #messages { height: 200px; overflow-y: scroll; border: 1px solid #ccc; margin-bottom: 10px; padding: 5px; }
+        #shareableUrlArea, #chatArea { margin-top: 20px; border-top: 1px solid #eee; padding-top: 10px; }
+        textarea { width: 80%; }
+    </style>
 </head>
 
 <body>
-    <h1>Serverless WebRTC Chat</h1>
+    <h1>Serverless WebRTC Chat (Debug)</h1>
+
+    <div id="statusArea">
+        <p><strong>PeerConnection Status:</strong> <span id="pcState">new</span></p>
+        <p><strong>ICE Gathering Status:</strong> <span id="iceGatheringState">new</span></p>
+        <p><strong>ICE Connection Status:</strong> <span id="iceConnectionState">new</span></p>
+        <p><strong>DataChannel Status:</strong> <span id="dcState">Not initialized</span></p>
+    </div>
 
     <div id="chatArea">
         <p><strong>Instructions:</strong> Share the generated URL to establish a connection.</p>
@@ -18,196 +31,349 @@
 
     <div id="shareableUrlArea">
         <p><strong>Shareable URL</strong></p>
-        <input type="text" id="shareableUrl" readonly />
+        <input type="text" id="shareableUrl" readonly size="80"/>
         <button id="copyUrlButton">Copy URL</button>
         <button id="whatsappShareButton">Share URL on WhatsApp</button>
         <button id="clearStorageButton">Clear Storage</button>
-
     </div>
 
     <script>
         document.addEventListener('DOMContentLoaded', async () => {
-            window.__WEBRTC_DEBUG = true;
-            window.__WEBRTC_TRACE_LEVEL = 4;
+            // --- Basic UI Update Functions ---
+            const updateStatus = (id, text) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = text;
+                console.log(`Status Update: ${id} = ${text}`);
+            };
+            const addLog = (text, prefix = 'Log') => {
+                console.log(`[${prefix}] ${text}`);
+                const messagesDiv = document.getElementById('messages');
+                if (messagesDiv) {
+                    const msgElement = document.createElement('p');
+                    msgElement.textContent = `[${prefix}] ${text}`;
+                    messagesDiv.appendChild(msgElement);
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight; // Auto-scroll
+                }
+            };
+
+            // --- WebRTC Setup ---
             if (!window.RTCPeerConnection) {
-                console.error("RTCPeerConnection not supported!");
+                addLog("RTCPeerConnection not supported!", "Error");
                 document.body.innerHTML = '<p>WebRTC is not supported in this browser</p>';
                 return;
             }
 
+            // --- SDP Compression/Decompression (Keep as is) ---
             function compressSDP(desc) {
                 const json = JSON.stringify(desc);
                 const compressed = pako.deflate(json, { to: 'string' });
-                return encodeURIComponent(btoa(String.fromCharCode.apply(null, compressed))); // Ensure URL-safe encoding
+                return encodeURIComponent(btoa(String.fromCharCode.apply(null, compressed)));
             }
-
             function decompressSDP(str) {
                 try {
-                    console.log("Attempting to decompress:", str.substring(0, 50) + "...");
-                    const decodedStr = decodeURIComponent(str); // Fix URL encoding issue
-                    return JSON.parse(pako.inflate(Uint8Array.from(atob(decodedStr), c => c.charCodeAt(0)), { to: 'string' }));
+                    addLog(`Attempting to decompress SDP (length: ${str.length})...`, "SDP");
+                    const decodedStr = decodeURIComponent(str);
+                    const inflated = pako.inflate(Uint8Array.from(atob(decodedStr), c => c.charCodeAt(0)), { to: 'string' });
+                    addLog("SDP Decompressed successfully.", "SDP");
+                    return JSON.parse(inflated);
                 } catch (error) {
-                    console.error("Error decoding SDP:", error);
-                    console.error("Error details:", error.message);
+                    addLog(`Error decoding/decompressing SDP: ${error.message}`, "Error");
+                    console.error("Error details:", error);
                     return null;
                 }
             }
 
+            // --- URL Handling ---
             function getQueryParam(name) {
                 return new URLSearchParams(window.location.search).get(name);
             }
-
             function updateShareableURL(param, value) {
                 const url = new URL(window.location.href);
                 url.search = `?${param}=${value}`;
-                document.getElementById('shareableUrl').value = url.toString();
+                const urlString = url.toString();
+                document.getElementById('shareableUrl').value = urlString;
+                addLog(`Shareable URL updated: ${param}=... (length ${value.length})`, "URL");
             }
 
+            // --- WebRTC Configuration ---
+            // TEST 1: Try with Google STUN
             const configuration = {
                 iceServers: [
                     { urls: 'stun:stun.l.google.com:19302' },
                     { urls: 'stun:stun1.l.google.com:19302' },
-                    { urls: 'stun:stun2.l.google.com:19302' }
+                    // { urls: 'stun:stun2.l.google.com:19302' } // Reduce redundancy slightly
                 ]
             };
+            // TEST 2: Try without STUN (for local loopback) - Uncomment below
+            // const configuration = {};
+            addLog(`Using ICE Config: ${JSON.stringify(configuration)}`, "WebRTC");
+
             let pc = new RTCPeerConnection(configuration);
             let dc = null;
+            let makingOffer = false; // Flag to distinguish initiator/receiver role more clearly
 
+            // --- PeerConnection Event Handlers ---
             pc.onicecandidate = e => {
-                if (!e.candidate) {
+                // Log every candidate found
+                if (e.candidate) {
+                     addLog(`ICE Candidate Found: ${e.candidate.candidate.split(' ')[0]} ${e.candidate.candidate.split(' ')[4]} (${e.candidate.sdpMLineIndex})`, "ICE");
+                     // NOTE: In a robust serverless setup, you might collect these
+                     // and add them to the URL/storage if needed, but it gets complex.
+                     // Your current code waits for gathering to finish.
+                } else {
+                    // Gathering finished
+                    addLog("ICE Candidate Gathering Complete.", "ICE");
+                    if (!pc.localDescription) {
+                        addLog("Error: ICE Gathering complete but no local description set?", "Error");
+                        return;
+                    }
                     const compressed = compressSDP(pc.localDescription);
                     if (pc.localDescription.type === 'offer') {
                         updateShareableURL('offer', compressed);
-                        localStorage.setItem('localOffer', compressed);
+                        localStorage.setItem('localOffer', compressed); // Keep for potential re-use/debugging
+                        addLog("Offer SDP finalized and URL updated.", "SDP");
                     } else if (pc.localDescription.type === 'answer') {
                         updateShareableURL('answer', compressed);
-                        localStorage.setItem('localAnswer', compressed);
+                        localStorage.setItem('localAnswer', compressed); // For the other tab to potentially poll or use
+                        addLog("Answer SDP finalized and URL updated.", "SDP");
                     }
                 }
+            };
+
+            pc.onicecandidateerror = e => {
+                 addLog(`ICE Candidate Error: ${e.errorCode} - ${e.errorText}`, "Error");
             };
 
             pc.onconnectionstatechange = () => {
+                updateStatus('pcState', pc.connectionState);
+                addLog(`PeerConnection State Change: ${pc.connectionState}`, "WebRTC");
                 if (pc.connectionState === 'connected') {
-                    console.log("✅ Connection established!");
-                    localStorage.removeItem('localOffer');
-                    localStorage.removeItem('remoteOffer');
-                    localStorage.removeItem('localAnswer');
+                    addLog("✅✅✅ PEER CONNECTION ESTABLISHED! ✅✅✅", "WebRTC");
+                    // Clear storage only on successful connection? Or keep for debug?
+                    // localStorage.removeItem('localOffer');
+                    // localStorage.removeItem('remoteOffer'); // You weren't using this key
+                    // localStorage.removeItem('localAnswer');
+                } else if (pc.connectionState === 'failed') {
+                     addLog("❌❌❌ PEER CONNECTION FAILED! ❌❌❌", "Error");
+                     // Attempt ICE restart? (More complex)
                 }
+            };
+
+            pc.oniceconnectionstatechange = () => {
+                 updateStatus('iceConnectionState', pc.iceConnectionState);
+                 addLog(`ICE Connection State Change: ${pc.iceConnectionState}`, "ICE");
+                 if (pc.iceConnectionState === 'failed') {
+                    addLog("❌ ICE Connection Failed. Check STUN/network?", "Error");
+                 }
+                 if (pc.iceConnectionState === 'disconnected') {
+                    addLog("⚠️ ICE Disconnected. Might reconnect.", "ICE");
+                 }
+                  if (pc.iceConnectionState === 'completed' || pc.iceConnectionState === 'connected') {
+                    addLog("✅ ICE Connection successful.", "ICE");
+                  }
+            };
+
+             pc.onicegatheringstatechange = () => {
+                updateStatus('iceGatheringState', pc.iceGatheringState);
+                addLog(`ICE Gathering State Change: ${pc.iceGatheringState}`, "ICE");
             };
 
             pc.ondatachannel = e => {
+                addLog("Received Data Channel!", "DataChannel");
                 dc = e.channel;
-                dc.onopen = () => console.log("Data channel opened");
-                dc.onmessage = e => {
-                    const message = document.createElement('p');
-                    message.textContent = 'Peer: ' + e.data;
-                    document.getElementById('messages').appendChild(message);
-                };
+                setupDataChannel(); // Setup handlers for the received channel
             };
 
             pc.onerror = function(event) {
-                if (event.error) {
-                    console.error('WebRTC error:', event.error);
-                } else {
-                    console.error('WebRTC error:', event);
-                }
+                addLog(`PeerConnection Error: ${event}`, "Error");
+                console.error('WebRTC error event:', event);
             };
 
+            // --- DataChannel Setup Function ---
+            function setupDataChannel() {
+                 if (!dc) {
+                    addLog("Error: setupDataChannel called but dc is null", "Error");
+                    return;
+                 }
+                 addLog(`Setting up Data Channel: ${dc.label}, State: ${dc.readyState}`, "DataChannel");
+                 updateStatus('dcState', dc.readyState);
+
+                 dc.onopen = () => {
+                    addLog("✅✅✅ DATA CHANNEL OPEN! ✅✅✅", "DataChannel");
+                    updateStatus('dcState', dc.readyState);
+                    addLog("You can now send messages.", "System");
+                    document.getElementById('messageInput').disabled = false;
+                    document.getElementById('sendButton').disabled = false;
+                 };
+
+                 dc.onclose = () => {
+                    addLog("Data Channel Closed.", "DataChannel");
+                    updateStatus('dcState', dc.readyState);
+                    document.getElementById('messageInput').disabled = true;
+                    document.getElementById('sendButton').disabled = true;
+                 };
+
+                 dc.onerror = (error) => {
+                    addLog(`Data Channel Error: ${error}`, "Error");
+                    console.error("Data channel error:", error);
+                    updateStatus('dcState', `Error (${dc.readyState})`);
+                 };
+
+                 dc.onmessage = e => {
+                    addLog(`Peer: ${e.data}`, "Message");
+                    // const message = document.createElement('p');
+                    // message.textContent = 'Peer: ' + e.data;
+                    // document.getElementById('messages').appendChild(message);
+                 };
+            }
+
+            // --- UI Event Handlers ---
             document.getElementById('sendButton').addEventListener('click', () => {
                 const message = document.getElementById('messageInput').value;
                 if (dc && dc.readyState === 'open') {
+                    addLog(`Me: ${message}`, "Message");
                     dc.send(message);
-                    const msgElement = document.createElement('p');
-                    msgElement.textContent = 'Me: ' + message;
-                    document.getElementById('messages').appendChild(msgElement);
+                    // const msgElement = document.createElement('p');
+                    // msgElement.textContent = 'Me: ' + message;
+                    // document.getElementById('messages').appendChild(msgElement);
                     document.getElementById('messageInput').value = '';
                 } else {
-                    alert('Data channel not open.');
+                    addLog(`Cannot send: Data channel not open (State: ${dc ? dc.readyState : 'null'})`, "Error");
+                    alert(`Data channel not open. Current state: ${dc ? dc.readyState : 'null'}`);
                 }
             });
-
-            const offer = getQueryParam('offer');
-            const answer = getQueryParam('answer');
-
-            if (!offer && !answer) {
-                /** INITIATOR MODE **/
-                console.log("🔵 Initiator mode: Generating an offer...");
-                dc = pc.createDataChannel("chat");
-                dc.onopen = () => console.log("Data channel opened");
-                dc.onmessage = e => {
-                    const message = document.createElement('p');
-                    message.textContent = 'Peer: ' + e.data;
-                    document.getElementById('messages').appendChild(message);
-                };
-
-                const offerDesc = await pc.createOffer();
-                await pc.setLocalDescription(offerDesc);
-                const compressedOffer = compressSDP(offerDesc);
-                updateShareableURL('offer', compressedOffer);
-                localStorage.setItem('localOffer', compressedOffer);
-
-                document.getElementById('whatsappShareButton').addEventListener('click', function () {
-                    const shareableUrl = document.getElementById('shareableUrl').value;
-                    const message = "Join My Session: offer " + shareableUrl;
-                    const whatsappUrl = "https://api.whatsapp.com/send?text=" + encodeURIComponent(message);
-                    window.open(whatsappUrl, "_blank");
-                });
-
-                /** POLL FOR ANSWER **/
-                const checkAnswer = setInterval(async () => {
-                    const storedAnswer = localStorage.getItem('localAnswer');
-                    if (storedAnswer) {
-                        clearInterval(checkAnswer);
-                        const answerDesc = decompressSDP(storedAnswer);
-                        await pc.setRemoteDescription(answerDesc);
-                        console.log("✅ Connection established!");
-                    }
-                }, 1000);
-
-            } else if (offer) {
-                /** RETRIEVER MODE **/
-                console.log("🟡 Retriever mode: Received offer, generating answer...");
-                const offerDesc = decompressSDP(offer);
-                await pc.setRemoteDescription(offerDesc);
-
-                const answerDesc = await pc.createAnswer();
-                await pc.setLocalDescription(answerDesc);
-                const compressedAnswer = compressSDP(answerDesc);
-
-                /** Displays the answer URL but does NOT set it yet **/
-                updateShareableURL('answer', compressedAnswer);
-                localStorage.setItem('localAnswer', compressedAnswer);
-                document.getElementById('whatsappShareButton').addEventListener('click', function () {
-                    const shareableUrl = document.getElementById('shareableUrl').value;
-                    const message = "Accepting you offer: answer " + shareableUrl;
-                    const whatsappUrl = "https://api.whatsapp.com/send?text=" + encodeURIComponent(message);
-                    window.open(whatsappUrl, "_blank");
-                });
-                console.log("🟡 Answer generated. Send the answer URL to the initiator.");
-
-            } else if (answer) {
-                /** RESPONSE MODE **/
-                console.log("🟢 Response mode: Storing answer and waiting for initiator...");
-                localStorage.setItem('localAnswer', answer);
-                document.body.innerHTML = '<p>You can now close this tab.</p>';
-            }
-
             document.getElementById('copyUrlButton').addEventListener('click', () => {
-                const shareableUrl = document.getElementById('shareableUrl');
+                // (Keep existing implementation)
+                 const shareableUrl = document.getElementById('shareableUrl');
                 shareableUrl.select();
                 navigator.clipboard.writeText(shareableUrl.value).then(() => {
-                    alert("URL copied to clipboard!");
+                    addLog("URL copied to clipboard.", "System");
+                    // alert("URL copied to clipboard!"); // Maybe replace alerts with logs
                 });
             });
-
             document.getElementById('clearStorageButton').addEventListener('click', () => {
+                // (Keep existing implementation)
                 localStorage.clear();
                 document.getElementById('shareableUrl').value = '';
-                alert("Local storage cleared.");
+                 addLog("Local storage cleared.", "System");
+                // alert("Local storage cleared.");
             });
+             document.getElementById('whatsappShareButton').addEventListener('click', function () {
+                const shareableUrl = document.getElementById('shareableUrl').value;
+                const urlType = new URLSearchParams(new URL(shareableUrl).search).keys().next().value || 'url';
+                const message = `WebRTC ${urlType} link: ${shareableUrl}`;
+                const whatsappUrl = "https://api.whatsapp.com/send?text=" + encodeURIComponent(message);
+                addLog("Opening WhatsApp share link...", "System");
+                window.open(whatsappUrl, "_blank");
+            });
+
+             // Disable message input initially
+            document.getElementById('messageInput').disabled = true;
+            document.getElementById('sendButton').disabled = true;
+
+            // --- Connection Logic ---
+            const offerParam = getQueryParam('offer');
+            const answerParam = getQueryParam('answer');
+            let localAnswerPoller = null; // Store interval ID
+
+            if (!offerParam && !answerParam) {
+                /** === INITIATOR MODE === **/
+                makingOffer = true;
+                addLog("🔵 Initiator mode: Creating Data Channel and Offer...", "System");
+                updateStatus('dcState', 'Initializing...');
+                dc = pc.createDataChannel("chat");
+                addLog("Data channel created.", "DataChannel");
+                setupDataChannel(); // Setup handlers immediately after creating
+
+                try {
+                    addLog("Creating Offer...", "SDP");
+                    const offerDesc = await pc.createOffer();
+                    addLog("Offer created, setting Local Description...", "SDP");
+                    await pc.setLocalDescription(offerDesc);
+                    addLog("Local Description (Offer) set.", "SDP");
+                    // ICE gathering starts automatically now... onicecandidate will handle URL update when done.
+
+                    // Poll for the answer coming back via localStorage
+                    addLog("Polling localStorage for 'remoteAnswer'...", "System");
+                    localAnswerPoller = setInterval(async () => {
+                        const remoteAnswerSDP = localStorage.getItem('remoteAnswer'); // Use a distinct key
+                        if (remoteAnswerSDP) {
+                            addLog("Found 'remoteAnswer' in localStorage!", "System");
+                            clearInterval(localAnswerPoller); // Stop polling
+                            localStorage.removeItem('remoteAnswer'); // Clean up immediately
+
+                            const answerDesc = decompressSDP(remoteAnswerSDP);
+                            if (answerDesc && pc.signalingState === 'have-local-offer') { // Check state
+                                try {
+                                    addLog("Setting Remote Description (Answer)...", "SDP");
+                                    await pc.setRemoteDescription(answerDesc);
+                                    addLog("Remote Description (Answer) set.", "SDP");
+                                    // Connection should now proceed... monitor state changes
+                                } catch (err) {
+                                    addLog(`Error setting remote description (Answer): ${err}`, "Error");
+                                }
+                            } else {
+                                addLog(`Could not set remote description. Invalid Answer SDP or wrong signaling state (${pc.signalingState})`, "Error");
+                            }
+                        }
+                    }, 2000); // Check every 2 seconds
+
+                } catch (err) {
+                    addLog(`Error in Initiator setup: ${err}`, "Error");
+                }
+
+            } else if (offerParam) {
+                /** === RECEIVER MODE (Processing Offer) === **/
+                addLog("🟡 Receiver mode: Received offer, processing...", "System");
+                const offerDesc = decompressSDP(offerParam);
+
+                if (offerDesc) {
+                    try {
+                        // Set up ondatachannel BEFORE setting remote description
+                        pc.ondatachannel = e => {
+                            addLog("ondatachannel event received!", "DataChannel");
+                            dc = e.channel;
+                            setupDataChannel();
+                        };
+                        addLog("Setting Remote Description (Offer)...", "SDP");
+                        await pc.setRemoteDescription(offerDesc); // Use the received offer
+                        addLog("Remote Description (Offer) set.", "SDP");
+
+                        addLog("Creating Answer...", "SDP");
+                        const answerDesc = await pc.createAnswer();
+                        addLog("Answer created, setting Local Description...", "SDP");
+                        await pc.setLocalDescription(answerDesc);
+                        addLog("Local Description (Answer) set.", "SDP");
+                        // ICE gathering starts... onicecandidate will handle URL update with 'answer' param when done.
+                        addLog("Answer generated. Send the 'answer' URL back to the initiator.", "System");
+
+                    } catch (err) {
+                        addLog(`Error processing offer or creating answer: ${err}`, "Error");
+                    }
+                } else {
+                    addLog("Failed to decompress/parse Offer SDP from URL.", "Error");
+                }
+
+            } else if (answerParam) {
+                /** === ANSWER TRANSFER MODE === **/
+                addLog("🟢 Answer Transfer mode: Storing answer in localStorage for initiator...", "System");
+                // Use a distinct key 'remoteAnswer' for the initiator to poll
+                localStorage.setItem('remoteAnswer', answerParam);
+                document.body.innerHTML = '<h2>Answer Sent</h2><p>The answer SDP has been stored. The initiator tab should now pick it up. You can likely close this tab.</p>';
+                // No RTCPeerConnection needed in this tab, it's just a courier.
+            }
+
+             // Cleanup interval on page unload
+             window.addEventListener('unload', () => {
+                if (localAnswerPoller) {
+                    clearInterval(localAnswerPoller);
+                }
+                if (pc && pc.connectionState !== 'closed') {
+                    pc.close(); // Attempt to close the connection cleanly
+                }
+             });
 
         });
     </script>
 </body>
-
 </html>
